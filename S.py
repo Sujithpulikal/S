@@ -1,39 +1,34 @@
 query = """
-INSERT INTO expense_travel_mapper (
-    expense_request_id,
-    expense_travel_type_id,
-    travel_start_date,
-    travel_end_date,
-    travel_origin,
-    travel_destination,
-    note,
-    travel_total_expense,
+INSERT INTO expense_accommodation_mapper (
+    location,
+    hotel_name,
+    check_in,
+    check_out,
+    accommodation_cost,
+    food_cost,
+    total_accommodation_cost,
     created_by,
     created_on,
     modified_by,
     modified_on
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, NOW())
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, NOW())
 """
 
-# Sample Data Insertion
-def add_travel_mapper(conn, request: ExpenseRequest):
+def add_accommodation_mapper(conn, accommodation: ExpenseAccommodationMapper, user_id: str):
     cursor = conn.cursor()
 
-    if request.Travel:
-        for travel in request.Travel:
-            data = (
-                request.expense_request_id,
-                travel.expense_travel_type_id,
-                travel.travel_start_date,
-                travel.travel_end_date,
-                travel.travel_origin,
-                travel.travel_destination,
-                travel.note,
-                travel.travel_total_expense,
-                request.user_id,
-                request.user_id
-            )
-            cursor.execute(query, data)
+    data = (
+        accommodation.location,
+        accommodation.hotel_name,
+        accommodation.check_in,
+        accommodation.check_out,
+        accommodation.accommodation_cost,
+        accommodation.food_cost,
+        accommodation.total_accommodation_cost,
+        user_id,
+        user_id
+    )
 
+    cursor.execute(query, data)
     conn.commit()
     cursor.close()
