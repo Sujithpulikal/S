@@ -1,38 +1,28 @@
-accommodation_query = """
-INSERT INTO expense_accommodation_mapper (
-    expense_request_id,
-    location,
-    hotel_name,
-    check_in,
-    check_out,
-    accommodation_cost,
-    food_cost,
-    note,
-    total_accommodation_cost,
-    created_by
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-"""
+DELIMITER $$
 
+CREATE TRIGGER update_total_from_travel
+AFTER INSERT ON expense_travel_mapper
+FOR EACH ROW
+BEGIN
+    DECLARE travel_total FLOAT;
+    DECLARE accommodation_total FLOAT;
 
-attachment_query = """
-INSERT INTO expense_attachment (
-    expense_request_id,
-    file_name,
-    file_type,
-    file_size,
-    created_by
-) VALUES (%s, %s, %s, %s, %s)
-"""
-travel_query = """
-INSERT INTO expense_travel_mapper (
-    expense_request_id,
-    travel_type_id,
-    travel_start_date,
-    travel_end_date,
-    travel_origin,
-    travel_destination,
-    note,
-    travel_total_expense,
-    created_by
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-"""
+    -- Get total from travel table
+    SELECT IFNULL(SUM(travel_total_expense), 0)
+    INTO travel_total
+    FROM expense_travel_mapper
+    WHERE expense_request_id = NEW.expense_request_id;
+
+    -- Get total from accommodation table
+    SELECT IFNULL(SUM(total_accommodation_cost), 0)
+    INTO accommodation_total
+    FROM expense_accommodation_mapper
+    WHERE expense_request_id = NEW.expense_request_id;
+
+    -- Update total in expense request table
+    UPDATE expense_request
+    SET total_amount = travel_total + accommodation_total
+    WHERE expense_request_id = NEW.expense_request_id;
+END $$
+
+DELIMITER ;
