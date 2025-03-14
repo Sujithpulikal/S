@@ -1,38 +1,22 @@
 DELIMITER $$
 
-CREATE TRIGGER update_total_on_accommodation_insert
-AFTER INSERT ON expense_accommodation_mapper
+CREATE TRIGGER calculate_total_travel_cost
+AFTER INSERT ON expense_travel_mapper
 FOR EACH ROW
 BEGIN
-    DECLARE travel_total FLOAT;
-    DECLARE accommodation_total FLOAT;
-    DECLARE travel_count INT;
-    
-    -- Check if travel data exists for this request
-    SELECT COUNT(*)
-    INTO travel_count
+    DECLARE last_total FLOAT;
+
+    -- Get the last total cost for the same expense_request_id
+    SELECT IFNULL(MAX(travel_total_expense), 0)
+    INTO last_total
     FROM expense_travel_mapper
-    WHERE expense_request_id = NEW.expense_request_id;
-    
-    -- Proceed only if travel data exists
-    IF travel_count > 0 THEN
-        -- Get total from travel table
-        SELECT IFNULL(SUM(travel_total_expense), 0)
-        INTO travel_total
-        FROM expense_travel_mapper
-        WHERE expense_request_id = NEW.expense_request_id;
+    WHERE expense_request_id = NEW.expense_request_id
+    AND expense_travel_mapper_id != NEW.expense_travel_mapper_id;
 
-        -- Get total from accommodation table
-        SELECT IFNULL(SUM(total_accommodation_cost), 0)
-        INTO accommodation_total
-        FROM expense_accommodation_mapper
-        WHERE expense_request_id = NEW.expense_request_id;
-
-        -- Update total in expense_request table
-        UPDATE expense_request
-        SET total_amount = travel_total + accommodation_total
-        WHERE expense_request_id = NEW.expense_request_id;
-    END IF;
+    -- Update the total cost for the current record
+    UPDATE expense_travel_mapper
+    SET travel_total_expense = NEW.travel_total_expense + last_total
+    WHERE expense_travel_mapper_id = NEW.expense_travel_mapper_id;
 END $$
 
 DELIMITER ;
