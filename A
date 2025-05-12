@@ -1,81 +1,187 @@
-import openai
+import os
+import json
 import requests
-from transformers import LlamaTokenizer, LlamaForCausalLM
-from transformers import AutoTokenizer, AutoModelForMaskedLM
-import torch
+from typing import List, Dict, Optional
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import warnings
 
-# Set up the API key and access token for OpenAI or your LLaMA model if using it through an API
-openai.api_key = 'your-api-key-here'
-access_token = 'your-access-token-here'
+warnings.filterwarnings('ignore')
 
-# Example medical text data (this can be replaced with your specific data from APIs or sources)
-medical_text = """
-Diabetes mellitus is a chronic condition that affects the body's ability to regulate blood sugar. 
-Symptoms can include frequent urination, increased thirst, and unexplained weight loss.
-"""
+# Configuration
+class Config:
+    LLAMA_API_KEY = "your_llama_api_key_here"
+    BIOCLINICALBERT_ACCESS_TOKEN = "your_bioclinicalbert_access_token_here"
+    LLAMA_API_URL = "https://api.llama.ai/v1/chat/completions"
+    BIOCLINICALBERT_API_URL = "https://api.bioclinicalbert.ai/embeddings"
+    VECTOR_DB_PATH = "medical_vector_db.json"
+    MEDICAL_KNOWLEDGE_PATH = "medical_knowledge.json"
+    SIMILARITY_THRESHOLD = 0.75
 
-# Load the BioClinicalBERT model (pretrained medical BERT model)
-bio_bert_model_name = "emilyalsentzer/Bio_ClinicalBERT"
-bio_bert_tokenizer = AutoTokenizer.from_pretrained(bio_bert_model_name)
-bio_bert_model = AutoModelForMaskedLM.from_pretrained(bio_bert_model_name)
+# Initialize embedding model (using SentenceTransformer locally)
+embedding_model = SentenceTransformer('emilyalsentzer/Bio_ClinicalBERT')
 
-# Set up LLaMA (or similar models if available locally)
-llama_model_name = "facebook/llama-7b"  # Adjust model name as per LLaMA availability
-llama_tokenizer = LlamaTokenizer.from_pretrained(llama_model_name)
-llama_model = LlamaForCausalLM.from_pretrained(llama_model_name)
+class MedicalVectorDB:
+    def __init__(self):
+        self.vector_db = self._load_vector_db()
+        self.medical_knowledge = self._load_medical_knowledge()
+        
+    def _load_vector_db(self) -> Dict:
+        if os.path.exists(Config.VECTOR_DB_PATH):
+            with open(Config.VECTOR_DB_PATH, 'r') as f:
+                return json.load(f)
+        return {"embeddings": [], "texts": [], "metadata": []}
+    
+    def _load_medical_knowledge(self) -> Dict:
+        if os.path.exists(Config.MEDICAL_KNOWLEDGE_PATH):
+            with open(Config.MEDICAL_KNOWLEDGE_PATH, 'r') as f:
+                return json.load(f)
+        return {"documents": []}
+    
+    def save_vector_db(self):
+        with open(Config.VECTOR_DB_PATH, 'w') as f:
+            json.dump(self.vector_db, f)
+    
+    def add_document(self, text: str, metadata: Dict = None):
+        embedding = embedding_model.encode(text)
+        self.vector_db["embeddings"].append(embedding.tolist())
+        self.vector_db["texts"].append(text)
+        self.vector_db["metadata"].append(metadata or {})
+        self.medical_knowledge["documents"].append({"text": text, "metadata": metadata})
+        self.save_vector_db()
+    
+    def search(self, query: str, top_k: int = 3) -> List[Dict]:
+        query_embedding = embedding_model.encode(query)
+        similarities = cosine_similarity(
+            [query_embedding],
+            self.vector_db["embeddings"]
+        )[0]
+        
+        # Get top_k most similar documents
+        top_indices = np.argsort(similarities)[-top_k:][::-1]
+        results = []
+        
+        for idx in top_indices:
+            if similarities[idx] > Config.SIMILARITY_THRESHOLD:
+                results.append({
+                    "text": self.vector_db["texts"][idx],
+                    "metadata": self.vector_db["metadata"][idx],
+                    "similarity": float(similarities[idx])
+                })
+        
+        return results
 
-def generate_answer_using_llama(input_text):
-    # Tokenize input and generate response using LLaMA
-    inputs = llama_tokenizer(input_text, return_tensors="pt")
-    output = llama_model.generate(**inputs, max_length=512, num_return_sequences=1)
-    response = llama_tokenizer.decode(output[0], skip_special_tokens=True)
-    return response
+class MedicalChatbot:
+    def __init__(self):
+        self.vector_db = MedicalVectorDB()
+    
+    def get_bioclinicalbert_embedding(self, text: str) -> List[float]:
+        """Get embedding from BioClinicalBERT API"""
+        headers = {
+            "Authorization": f"Bearer {Config.BIOCLINICALBERT_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "inputs": text,
+            "options": {"wait_for_model": True}
+        }
+        
+        response = requests.post(
+            Config.BIOCLINICALBERT_API_URL,
+            headers=headers,
+            json=payload
+        )
+        
+        if response.status_code == 200:
+            return response.json()[0]['embedding']
+        else:
+            print(f"Error getting BioClinicalBERT embedding: {response.text}")
+            return embedding_model.encode(text).tolist()
+    
+    def query_llama(self, prompt: str, context: str = "") -> str:
+        """Query LLaMA model with the given prompt and context"""
+        headers = {
+            "Authorization": f"Bearer {Config.LLAMA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        full_prompt = f"Context: {context}\n\nQuestion: {prompt}\n\nAnswer:" if context else prompt
+        
+        payload = {
+            "model": "llama-2-70b-chat",
+            "messages": [{"role": "user", "content": full_prompt}],
+            "temperature": 0.7,
+            "max_tokens": 500
+        }
+        
+        response = requests.post(
+            Config.LLAMA_API_URL,
+            headers=headers,
+            json=payload
+        )
+        
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+        else:
+            return f"Error: {response.text}"
+    
+    def generate_response(self, user_query: str) -> str:
+        # Step 1: Retrieve relevant medical context
+        search_results = self.vector_db.search(user_query)
+        context = "\n\n".join([res["text"] for res in search_results])
+        
+        # Step 2: Generate prompt with context
+        prompt = f"""
+        You are a medical assistant. Provide accurate, helpful information based on the context below.
+        If you're unsure or the answer isn't in the context, say you don't know.
+        
+        Context:
+        {context}
+        
+        Question: {user_query}
+        
+        Answer:
+        """
+        
+        # Step 3: Query LLaMA with the prompt
+        response = self.query_llama(prompt)
+        
+        return response
+    
+    def initialize_medical_knowledge(self):
+        """Initialize the vector DB with some basic medical knowledge"""
+        if len(self.vector_db.vector_db["texts"]) == 0:
+            print("Initializing medical knowledge base...")
+            basic_medical_facts = [
+                {"text": "Hypertension, also known as high blood pressure, is a condition where the force of the blood against the artery walls is too high.", 
+                 "metadata": {"condition": "hypertension"}},
+                {"text": "Symptoms of diabetes include increased thirst, frequent urination, and unexplained weight loss.", 
+                 "metadata": {"condition": "diabetes"}},
+                {"text": "The normal range for blood pressure is less than 120/80 mmHg.", 
+                 "metadata": {"topic": "blood pressure"}},
+                {"text": "Antibiotics are used to treat bacterial infections, not viral infections.", 
+                 "metadata": {"topic": "antibiotics"}},
+                {"text": "CPR (Cardiopulmonary Resuscitation) involves chest compressions and rescue breaths to maintain circulation and oxygenation during cardiac arrest.", 
+                 "metadata": {"procedure": "CPR"}}
+            ]
+            
+            for fact in basic_medical_facts:
+                self.vector_db.add_document(fact["text"], fact["metadata"])
+            
+            print("Medical knowledge base initialized with basic facts.")
 
-def generate_answer_using_biomedical_bert(input_text):
-    # Tokenize and run the model for masked language modeling or other tasks
-    inputs = bio_bert_tokenizer(input_text, return_tensors="pt")
-    outputs = bio_bert_model(**inputs)
-    logits = outputs.logits
-    return logits
-
-def get_medical_answer_from_fias(input_text):
-    # Assuming Fias RAG API or local bot
-    api_url = "https://api.fiaschatbot.com/query"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "x-api-key": "your-api-key-here"
-    }
-    payload = {
-        "question": input_text,
-        "context": medical_text  # Provide context here if needed
-    }
-    response = requests.post(api_url, headers=headers, json=payload)
-    if response.status_code == 200:
-        return response.json()["answer"]
-    else:
-        return "Error: Unable to fetch the answer from FIAS."
-
-# Main function to handle incoming queries
-def answer_medical_query(query):
-    try:
-        # First try using the LLaMA model for general NLP response
-        llama_response = generate_answer_using_llama(query)
-        print(f"LLaMA Response: {llama_response}")
-
-        # Alternatively, use BioClinicalBERT for medical text-related queries
-        bert_response = generate_answer_using_biomedical_bert(query)
-        print(f"BioClinicalBERT Output: {bert_response}")
-
-        # Use Fias RAG chatbot for specialized medical question answering
-        fias_response = get_medical_answer_from_fias(query)
-        print(f"Fias RAGbot Response: {fias_response}")
-        return fias_response  # Preferably returning the most contextually relevant answer
-
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        return "An error occurred while processing your query."
-
-# Example usage:
-query = "What are the symptoms of diabetes?"
-answer = answer_medical_query(query)
-print(f"Final Answer: {answer}")
+# Example usage
+if __name__ == "__main__":
+    chatbot = MedicalChatbot()
+    chatbot.initialize_medical_knowledge()
+    
+    print("Medical Chatbot initialized. Type 'exit' to quit.")
+    
+    while True:
+        user_input = input("User: ")
+        if user_input.lower() in ['exit', 'quit']:
+            break
+        
+        response = chatbot.generate_response(user_input)
+        print(f"Bot: {response}")
