@@ -1,80 +1,133 @@
-pip install langchain faiss-cpu pypdf pandas huggingface_hub torch transformers
-pip install langchain-groq
-
-from langchain.document_loaders import PyPDFLoader, CSVLoader
-
-# Load PDF
-pdf_loader = PyPDFLoader("data/clinical_guidelines.pdf")
-pdf_docs = pdf_loader.load()
-
-# Load CSV
-csv_loader = CSVLoader(file_path="data/lab_results.csv")
-csv_docs = csv_loader.load()
-
-# Combine documents
-all_docs = pdf_docs + csv_docs
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-chunks = splitter.split_documents(all_docs)
-
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-chunks = splitter.split_documents(all_docs)
-
-from transformers import AutoTokenizer, AutoModel
-import torch
+from transformers import AutoTokenizer, AutoModelForQuestionAnswering, pipeline
+from sentence_transformers import SentenceTransformer
+import faiss
 import numpy as np
-from langchain.embeddings.base import Embeddings
+import torch
 
-class BioBERTEmbeddings(Embeddings):
-    def __init__(self, model_name="dmis-lab/biobert-base-cased-v1.1"):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
+class BioBERTRAGChatbot:
+    def __init__(self, hf_token=None, api_key=None):
+        """
+        Initialize the BioBERT RAG Chatbot
+        
+        Args:
+            hf_token (str): Hugging Face login token for private models
+            api_key (str): API key for any external services
+        """
+        self.hf_token = hf_token
+        self.api_key = api_key
+        
+        # Load BioBERT model and tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "dmis-lab/biobert-v1.1",
+            use_auth_token=self.hf_token
+        )
+        
+        self.qa_model = AutoModelForQuestionAnswering.from_pretrained(
+            "dmis-lab/biobert-v1.1",
+            use_auth_token=self.hf_token
+        )
+        
+        # Initialize QA pipeline
+        self.qa_pipeline = pipeline(
+            "question-answering",
+            model=self.qa_model,
+            tokenizer=self.tokenizer
+        )
+        
+        # Initialize sentence transformer for embeddings
+        self.embedder = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+        
+        # Initialize FAISS index for document retrieval
+        self.index = None
+        self.documents = []
+    
+    def add_documents(self, documents):
+        """
+        Add documents to the knowledge base
+        
+        Args:
+            documents (list): List of text documents to add to the knowledge base
+        """
+        self.documents.extend(documents)
+        embeddings = self.embedder.encode(documents)
+        
+        if self.index is None:
+            self.index = faiss.IndexFlatL2(embeddings.shape[1])
+            self.index.add(embeddings)
+        else:
+            self.index.add(embeddings)
+    
+    def retrieve_relevant_documents(self, query, k=3):
+        """
+        Retrieve relevant documents for a query
+        
+        Args:
+            query (str): User query
+            k (int): Number of documents to retrieve
+            
+        Returns:
+            list: Relevant documents
+        """
+        query_embedding = self.embedder.encode([query])
+        distances, indices = self.index.search(query_embedding, k)
+        
+        return [self.documents[i] for i in indices[0]]
+    
+    def generate_answer(self, question, context=None):
+        """
+        Generate an answer to a question
+        
+        Args:
+            question (str): User question
+            context (str, optional): Context for the question. If None, will retrieve relevant documents.
+            
+        Returns:
+            dict: Answer containing 'answer' and 'score'
+        """
+        if context is None:
+            relevant_docs = self.retrieve_relevant_documents(question)
+            context = " ".join(relevant_docs)
+        
+        result = self.qa_pipeline({
+            'question': question,
+            'context': context
+        })
+        
+        return {
+            'answer': result['answer'],
+            'score': result['score'],
+            'context': context
+        }
+    
+    def chat(self):
+        """Interactive chat interface"""
+        print("BioBERT RAG Chatbot initialized. Type 'quit' to exit.")
+        while True:
+            question = input("You: ")
+            if question.lower() == 'quit':
+                break
+                
+            response = self.generate_answer(question)
+            print(f"Bot: {response['answer']}")
+            print(f"Confidence: {response['score']:.2f}")
+            print(f"Source context: {response['context'][:200]}...\n")
 
-    def embed_documents(self, texts):
-        embeddings = []
-        for text in texts:
-            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            mean_embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
-            embeddings.append(mean_embedding)
-        return embeddings
-
-    def embed_query(self, text):
-        return self.embed_documents([text])[0]
-
-embedding = BioBERTEmbeddings()
-
-from langchain.vectorstores import FAISS
-
-vectorstore = FAISS.from_documents(chunks, embedding)
-vectorstore.save_local("faiss_biobert_index")
-
-
-retriever = vectorstore.as_retriever()
-
-
-from langchain_groq import ChatGroq
-
-llm = ChatGroq(
-    api_key="your_groq_api_key", 
-    model_name="mixtral-8x7b-32768"  # Or other supported Groq model
-)
-
-
-from langchain.chains import RetrievalQA
-
-rag_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    retriever=retriever,
-    return_source_documents=True
-)
-
-query = "What are the symptoms of diabetic ketoacidosis?"
-result = rag_chain({"query": query})
-
-print("Answer:", result['result'])
-print("Source:", result['source_documents'][0].metadata)
+# Example usage
+if __name__ == "__main__":
+    # Initialize with your Hugging Face token and API key if needed
+    chatbot = BioBERTRAGChatbot(
+        hf_token="your_huggingface_token",  # Replace with your token
+        api_key="your_api_key"              # Replace if using external APIs
+    )
+    
+    # Add some biomedical documents to the knowledge base
+    medical_docs = [
+        "Diabetes is a chronic condition characterized by high blood sugar levels.",
+        "Insulin is a hormone produced by the pancreas that regulates blood sugar.",
+        "Type 2 diabetes occurs when the body becomes resistant to insulin.",
+        "Common symptoms of diabetes include frequent urination, increased thirst, and fatigue."
+    ]
+    chatbot.add_documents(medical_docs)
+    
+    # Start interactive chat
+    chatbot.chat()
