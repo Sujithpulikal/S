@@ -1,1 +1,80 @@
-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
+pip install langchain faiss-cpu pypdf pandas huggingface_hub torch transformers
+pip install langchain-groq
+
+from langchain.document_loaders import PyPDFLoader, CSVLoader
+
+# Load PDF
+pdf_loader = PyPDFLoader("data/clinical_guidelines.pdf")
+pdf_docs = pdf_loader.load()
+
+# Load CSV
+csv_loader = CSVLoader(file_path="data/lab_results.csv")
+csv_docs = csv_loader.load()
+
+# Combine documents
+all_docs = pdf_docs + csv_docs
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+chunks = splitter.split_documents(all_docs)
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+chunks = splitter.split_documents(all_docs)
+
+from transformers import AutoTokenizer, AutoModel
+import torch
+import numpy as np
+from langchain.embeddings.base import Embeddings
+
+class BioBERTEmbeddings(Embeddings):
+    def __init__(self, model_name="dmis-lab/biobert-base-cased-v1.1"):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+
+    def embed_documents(self, texts):
+        embeddings = []
+        for text in texts:
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            mean_embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+            embeddings.append(mean_embedding)
+        return embeddings
+
+    def embed_query(self, text):
+        return self.embed_documents([text])[0]
+
+embedding = BioBERTEmbeddings()
+
+from langchain.vectorstores import FAISS
+
+vectorstore = FAISS.from_documents(chunks, embedding)
+vectorstore.save_local("faiss_biobert_index")
+
+
+retriever = vectorstore.as_retriever()
+
+
+from langchain_groq import ChatGroq
+
+llm = ChatGroq(
+    api_key="your_groq_api_key", 
+    model_name="mixtral-8x7b-32768"  # Or other supported Groq model
+)
+
+
+from langchain.chains import RetrievalQA
+
+rag_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=retriever,
+    return_source_documents=True
+)
+
+query = "What are the symptoms of diabetic ketoacidosis?"
+result = rag_chain({"query": query})
+
+print("Answer:", result['result'])
+print("Source:", result['source_documents'][0].metadata)
